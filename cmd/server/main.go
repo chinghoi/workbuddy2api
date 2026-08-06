@@ -45,8 +45,7 @@ func main() {
 		p.Add(a)
 	}
 
-	up := upstream.New()
-	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	up := upstream.New(cfg.Upstream.TimeoutSeconds)
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,

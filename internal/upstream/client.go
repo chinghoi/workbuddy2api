@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -117,15 +118,21 @@ type Client struct {
 	BillingBaseGlob string
 }
 
-// New 生产默认值。配置连接池减少 TLS 握手。
-func New() *Client {
+// New 生产默认值。timeoutSeconds 仅用于约束"上游多久必须返回响应头"
+// （ResponseHeaderTimeout）；注意不设置 http.Client.Timeout——否则会把整个
+// SSE 流读取计入并掐断长对话（>timeoutSeconds 即被强制 cancel）。
+func New(timeoutSeconds int) *Client {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 120
+	}
 	tr := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: time.Duration(timeoutSeconds) * time.Second,
 	}
 	return &Client{
-		HTTP:            &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		HTTP:            &http.Client{Timeout: 0, Transport: tr},
 		ChatBaseCN:      "https://copilot.tencent.com",
 		BillingBaseCN:   "https://www.codebuddy.cn",
 		ChatBaseGlobal:  "https://www.workbuddy.ai",
@@ -217,9 +224,10 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify(status, string(body))）、err 为 nil；
 // 只有传输层失败才返回 err。
-func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+// ctx 透传下游客户端生命周期：客户端断开即取消上游读流，避免悬空连接。
+func (c *Client) ChatStream(a *auth.Auth, body []byte, ctx context.Context) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	url := c.chatBase(a) + "/v2/chat/completions"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(PrepareBody(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(PrepareBody(body)))
 	if err != nil {
 		return nil, 0, nil, err
 	}

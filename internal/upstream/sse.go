@@ -191,6 +191,11 @@ func sortInts(a []int) {
 
 // Stream 透传上游 SSE 到 w（每行 flush），保证至少写一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
+//
+// 稳定性增强：
+//   - keepalive：每 15s 写一个 SSE comment（": keepalive"），避免长空闲被中间层掐断。
+//   - 优雅收尾：流中途读错误时（上游抖动/超时取消）补写 data:[DONE]，
+//     让客户端正常结束而非 abrupt close。
 func Stream(w http.ResponseWriter, r io.Reader) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
@@ -199,6 +204,28 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 	h.Set("X-Accel-Buffering", "no")
 	fl, _ := w.(http.Flusher)
 	br := bufio.NewReaderSize(r, 64*1024)
+
+	// keepalive：防止两次 token 间空闲超时被中间层（本机 proxy / OS）掐断。
+	stop := make(chan struct{})
+	defer close(stop)
+	if fl != nil {
+		go func() {
+			t := time.NewTicker(15 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
+						return
+					}
+					fl.Flush()
+				}
+			}
+		}()
+	}
+
 	sawDone := false
 	for {
 		line, err := br.ReadString('\n')
@@ -216,6 +243,12 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 		if err != nil {
 			if err == io.EOF {
 				break
+			}
+			// 中途读错误：尽量补 [DONE]，让客户端干净结束而非 abrupt close。
+			if !sawDone {
+				if _, e := io.WriteString(w, "data: [DONE]\n\n"); e == nil && fl != nil {
+					fl.Flush()
+				}
 			}
 			return err
 		}

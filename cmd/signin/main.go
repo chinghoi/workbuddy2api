@@ -34,7 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 	sort.Strings(files)
-	up := upstream.New()
+	up := upstream.New(0)
 
 	var rows []row
 	okN, alreadyN, failN := 0, 0, 0

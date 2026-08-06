@@ -181,7 +181,7 @@ func TestChatSessionDeadDisables(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New(0)})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -345,7 +345,7 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 func TestAPIKeyAuth(t *testing.T) {
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
-		Upstream: upstream.New(),
+		Upstream: upstream.New(0),
 		APIKey:   "secret",
 	})
 	// 无 key
@@ -376,7 +376,7 @@ func TestAPIKeyAuth(t *testing.T) {
 func TestStatusEndpoint(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	p.SetCredits("u1", 42)
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New(0)})
 	req := httptest.NewRequest("GET", "/status", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -393,7 +393,7 @@ func TestStatusEndpoint(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New(0)})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != 200 {
@@ -403,7 +403,7 @@ func TestHealthz(t *testing.T) {
 
 func TestStatusRequiresAuth(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New(), APIKey: "secret"})
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New(0), APIKey: "secret"})
 
 	// 无 token → 401
 	rec := httptest.NewRecorder()

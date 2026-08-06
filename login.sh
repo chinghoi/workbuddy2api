@@ -67,8 +67,29 @@ USER_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdi
 ENT_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enterprise_id',''))")
 NICKNAME=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('nickname',''))")
 
-if [[ -z "$USER_ID" ]]; then
-    echo "无法获取 uid，请检查 token 是否有效"
+# ─── [诊断] poll 返回摘要（脱敏，token 只显示前 16 位）──────────────────
+echo ""
+echo "poll 返回摘要（脱敏）:"
+echo "$RESULT" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+def m(v):
+    v=str(v) if v is not None else ''
+    return (v[:16]+'...') if len(v)>16 else (v or '(空)')
+print('  access_token : %s' % m(d.get('access_token')))
+print('  refresh_token: %s' % m(d.get('refresh_token')))
+print('  expires_in   : %r' % d.get('expires_in'))
+print('  domain       : %r' % d.get('domain'))
+print('  uid          : %r' % d.get('uid'))
+print('  enterprise_id: %r' % d.get('enterprise_id'))
+print('  nickname     : %r' % d.get('nickname'))
+"
+echo ""
+
+# 注意：bash 3.2 会把 $USER_ID 后紧跟的全角字符误并入变量名，
+# 故后续一律用 ${USER_ID:-} 显式展开，并在未取到时立即报错退出。
+if [[ -z "${USER_ID:-}" || "$USER_ID" == "None" ]]; then
+    echo "无法获取 uid（uid 为空/缺失/null）。请把上面 poll 摘要完整贴出来排查。"
     exit 1
 fi
 
@@ -111,10 +132,10 @@ PYEOF
 # ─── 落盘 auth 文件（与 internal/auth 读取格式一致）─────────────────
 AUTH_FILE="$AUTH_DIR/workbuddy-${USER_ID}.json"
 if [[ -f "$AUTH_FILE" ]]; then
-    echo "账号已存在（uid=$USER_ID），将覆盖更新凭证"
+    echo "账号已存在（uid=${USER_ID}），将覆盖更新凭证"
     ACTION="覆盖"
 else
-    echo "新账号（uid=$USER_ID），新增 auth 文件"
+    echo "新账号（uid=${USER_ID}），新增 auth 文件"
     ACTION="新增"
 fi
 python3 - <<PYEOF
@@ -122,20 +143,20 @@ import json
 
 auth = {
     "account": {
-        "uid": "$USER_ID",
-        "enterpriseId": "$ENT_ID",
-        "nickname": "$NICKNAME"
+        "uid": "${USER_ID}",
+        "enterpriseId": "${ENT_ID}",
+        "nickname": "${NICKNAME}"
     },
     "auth": {
-        "accessToken": "$TOKEN",
-        "refreshToken": "$REFRESH",
-        "expiresAt": $EXPIRES_AT,
-        "domain": "$DOMAIN"
+        "accessToken": "${TOKEN}",
+        "refreshToken": "${REFRESH}",
+        "expiresAt": ${EXPIRES_AT},
+        "domain": "${DOMAIN}"
     }
 }
-with open("$AUTH_FILE", "w") as f:
+with open("${AUTH_FILE}", "w") as f:
     json.dump(auth, f, indent=1)
-print(f"已保存（$ACTION）: $AUTH_FILE")
+print(f"已保存（${ACTION}）: ${AUTH_FILE}")
 PYEOF
 
 # ─── 重启服务 ────────────────────────────────────────────

@@ -12,6 +12,10 @@ signin_bin
 
 # Config with secrets (use config.example.json)
 config.json
+config.json.bak
+
+# WorkBuddy agent working memory (not project source)
+.workbuddy/
 
 # Build artifacts
 *.tmp

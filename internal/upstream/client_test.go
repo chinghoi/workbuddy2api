@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -134,7 +135,7 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		}, nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1", EnterpriseID: "e1"}
-	rc, status, respBody, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`))
+	rc, status, respBody, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`), context.Background())
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -155,7 +156,7 @@ func TestChatStreamHardCreditError(t *testing.T) {
 		return jsonResp(402, `{"code":1,"msg":"余额不足"}`), nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	_, status, respBody, err := c.ChatStream(a, []byte(`{}`))
+	_, status, respBody, err := c.ChatStream(a, []byte(`{}`), context.Background())
 	if status != 402 {
 		t.Errorf("status=%d", status)
 	}
