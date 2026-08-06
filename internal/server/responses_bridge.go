@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -223,6 +225,12 @@ func compileBridgeTools(candidates []bridgeToolCandidate) ([]map[string]any, ups
 
 func compileBridgeTool(tool map[string]any, compact bool) (map[string]any, upstream.ResponseToolSpec, bool) {
 	typ, _ := tool["type"].(string)
+	// Responses namespaces describe methods that are already exposed inside the
+	// programmatic exec runtime. Chat Completions has no namespace tool type;
+	// compiling one as an empty function only encourages invalid direct calls.
+	if typ == "namespace" {
+		return nil, upstream.ResponseToolSpec{}, false
+	}
 	name, description := "", ""
 	var parameters any
 	var strict any
@@ -290,7 +298,7 @@ func compileBridgeTool(tool map[string]any, compact bool) (map[string]any, upstr
 
 func compactToolDescription(name, description string, kind upstream.ResponseToolKind) string {
 	if name == "exec" && kind == upstream.ResponseToolCustom {
-		return "Run raw JavaScript orchestration source. Await nested tools through the global tools object. Input is JavaScript source text, not JSON or Markdown."
+		return compactExecToolDescription(description)
 	}
 	description = strings.TrimSpace(description)
 	if description == "" && kind == upstream.ResponseToolCustom {
@@ -302,6 +310,48 @@ func compactToolDescription(name, description string, kind upstream.ResponseTool
 	}
 	runes := []rune(description)
 	return string(runes[:maxRunes]) + "…"
+}
+
+var execToolDeclarationPattern = regexp.MustCompile(`declare const tools:\s*\{\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(`)
+
+// compactExecToolDescription keeps the operational contract needed by models
+// to use ChatGPT.app's programmatic tool runtime, without forwarding the full
+// multi-kilobyte schema that can trip WorkBuddy's content filter.
+func compactExecToolDescription(description string) string {
+	toolNames := extractExecToolNames(description)
+	available := ""
+	if len(toolNames) > 0 {
+		available = " Known nested methods: " + strings.Join(toolNames, ", ") + "."
+	}
+
+	return "Run raw JavaScript orchestration source in a fresh V8 isolate. " +
+		"Use await tools.<name>(...) for shell, file, browser, MCP, Git, and app actions. " +
+		"For shell commands use: const r = await tools.exec_command({cmd: \"git status --short\", workdir: \"/path/to/repo\"}); text(r.output); " +
+		"Call text(value) to emit output; bare expressions are discarded. " +
+		"Do not send shell syntax directly and do not use console, require, process, Node imports, direct file-system APIs, or direct network APIs. " +
+		"Input must be raw JavaScript source, not JSON or Markdown. " +
+		"To discover omitted methods use text(ALL_TOOLS.map(x => x.name).join(\"\\n\"))." + available
+}
+
+func extractExecToolNames(description string) []string {
+	matches := execToolDeclarationPattern.FindAllStringSubmatch(description, -1)
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 || match[1] == "" {
+			continue
+		}
+		seen[match[1]] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	const maxNames = 24
+	if len(names) > maxNames {
+		names = names[:maxNames]
+	}
+	return names
 }
 
 func bridgeToolChoice(choice any) any {
