@@ -28,6 +28,10 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		w = capture
 		defer capture.Close() //nolint:errcheck // debug capture must not alter API behavior
 	}
+	// Normalize Chat Completions token usage to the field names and detail
+	// objects required by Responses API clients. This wrapper is outside the
+	// capture writer so output.raw records the exact normalized client output.
+	w = newResponsesUsageWriter(w)
 
 	var peek struct {
 		Stream bool   `json:"stream"`
