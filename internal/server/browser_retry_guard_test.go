@@ -22,10 +22,10 @@ func TestGuardBrowserRetryLoopAddsSingleRecoveryInstruction(t *testing.T) {
 	}
 	text := browserRecoveryText(input)
 	for _, expected := range []string{
-		"Make at most one recovery tool call",
+		"Make at most one recovery Browser call",
 		"one nested async IIFE",
-		"nodeRepl.write",
-		"tool access will be revoked",
+		"rather than r.output",
+		"Browser/exec access will be revoked",
 		"Identifier 'tab' has already been declared",
 	} {
 		if !strings.Contains(text, expected) {
@@ -33,16 +33,16 @@ func TestGuardBrowserRetryLoopAddsSingleRecoveryInstruction(t *testing.T) {
 		}
 	}
 	if !hasAdditionalToolsItem(input) {
-		t.Fatal("single failure unexpectedly removed browser tools")
+		t.Fatal("single runtime failure unexpectedly removed browser tools")
 	}
-	if len(bridgeResponsesRequest(guarded).Tools) == 0 {
-		t.Fatal("single failure unexpectedly removed bridged tool specs")
+	if !bridgeResponsesRequest(guarded).Tools.IsCustom("exec") {
+		t.Fatal("single runtime failure unexpectedly removed exec")
 	}
 }
 
-func TestGuardBrowserRetryLoopStopsAfterThreeFailuresAndCompactsHistory(t *testing.T) {
+func TestGuardBrowserRetryLoopStopsAfterThreeRuntimeFailuresAndCompactsHistory(t *testing.T) {
 	body := browserRetryTestBody([]browserRetryTestAttempt{
-		{id: "call_1", output: "undefined\nundefined"},
+		{id: "call_1", output: "ReferenceError: tab is not defined"},
 		{id: "call_2", output: "SyntaxError: Identifier 'info' has already been declared"},
 		{id: "call_3", output: "TypeError: allInnerTexts is not a function"},
 	})
@@ -52,22 +52,24 @@ func TestGuardBrowserRetryLoopStopsAfterThreeFailuresAndCompactsHistory(t *testi
 	if err := json.Unmarshal(guarded, &request); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"tools", "functions", "tool_choice", "function_call", "parallel_tool_calls"} {
-		if _, exists := request[key]; exists {
-			t.Fatalf("retry circuit breaker retained top-level %s", key)
-		}
-	}
 	input, _ := request["input"].([]any)
-	if hasAdditionalToolsItem(input) {
-		t.Fatal("retry circuit breaker retained additional_tools")
+	if !hasAdditionalToolsItem(input) {
+		t.Fatal("circuit breaker should preserve non-browser additional tools")
 	}
 	text := browserRecoveryText(input)
 	if !strings.Contains(text, "failed 3 consecutive times") ||
-		!strings.Contains(text, "Do not call any tool again") {
+		!strings.Contains(text, "Do not call the Browser bridge or the exec tool again") {
 		t.Fatalf("missing circuit-breaker instruction: %s", text)
 	}
-	if len(bridgeResponsesRequest(guarded).Tools) != 0 {
-		t.Fatal("retry circuit breaker still exposed bridged tools")
+	bridge := bridgeResponsesRequest(guarded)
+	if bridge.Tools.IsCustom("exec") {
+		t.Fatal("circuit breaker still exposed exec")
+	}
+	if _, ok := bridge.Tools["request_user_input"]; !ok {
+		t.Fatalf("circuit breaker removed unrelated request_user_input: %#v", bridge.Tools)
+	}
+	if _, ok := bridge.Tools["wait"]; !ok {
+		t.Fatalf("circuit breaker removed unrelated wait tool: %#v", bridge.Tools)
 	}
 
 	calls := map[string]map[string]any{}
@@ -95,6 +97,56 @@ func TestGuardBrowserRetryLoopStopsAfterThreeFailuresAndCompactsHistory(t *testi
 	}
 }
 
+func TestGuardBrowserRetryLoopMCPOutputPropertyIsForwardingFailure(t *testing.T) {
+	body := browserRetryTestBody([]browserRetryTestAttempt{
+		{id: "call_1", output: "Script completed\nWall time 0.0 seconds\nOutput:\nundefined"},
+	})
+
+	guarded := guardBrowserRetryLoop(body)
+	var request map[string]any
+	if err := json.Unmarshal(guarded, &request); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := request["input"].([]any)
+	if got := countBrowserRecoveryMessages(input); got != 0 {
+		t.Fatalf("forwarding failure incorrectly counted as runtime failure: %d recovery messages", got)
+	}
+	text := browserGuardTextWithMarker(input, browserForwardingMarker)
+	for _, expected := range []string{
+		"output-forwarding failure, not evidence that the Browser itself failed",
+		"never use r.output for mcp__node_repl__js",
+		"r?.content",
+		"Do not blindly repeat a potentially state-changing",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("forwarding instruction missing %q: %s", expected, text)
+		}
+	}
+	if !bridgeResponsesRequest(guarded).Tools.IsCustom("exec") {
+		t.Fatal("forwarding failure should keep exec available for corrected verification/retry")
+	}
+}
+
+func TestGuardBrowserRetryLoopRepeatedForwardingFailuresDoNotOpenBreaker(t *testing.T) {
+	body := browserRetryTestBody([]browserRetryTestAttempt{
+		{id: "call_1", output: "undefined"},
+		{id: "call_2", output: "Script completed\nWall time 0.0 seconds\nOutput:\nundefined"},
+	})
+	guarded := guardBrowserRetryLoop(body)
+	bridge := bridgeResponsesRequest(guarded)
+	if !bridge.Tools.IsCustom("exec") {
+		t.Fatal("repeated MCP forwarding mistakes must not revoke Browser/exec access")
+	}
+	var request map[string]any
+	if err := json.Unmarshal(guarded, &request); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := request["input"].([]any)
+	if text := browserGuardTextWithMarker(input, browserForwardingMarker); text == "" {
+		t.Fatal("missing forwarding correction after repeated forwarding mistakes")
+	}
+}
+
 func TestGuardBrowserRetryLoopSuccessfulAttemptResetsRecovery(t *testing.T) {
 	body := browserRetryTestBody([]browserRetryTestAttempt{
 		{id: "call_1", output: "[object Object]"},
@@ -105,7 +157,10 @@ func TestGuardBrowserRetryLoopSuccessfulAttemptResetsRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	input, _ := request["input"].([]any)
-	input = append(input, browserGuardMessage("stale recovery", browserRecoveryMarker))
+	input = append(input,
+		browserGuardMessage("stale recovery", browserRecoveryMarker),
+		browserGuardMessage("stale forwarding", browserForwardingMarker),
+	)
 	request["input"] = input
 	body, _ = json.Marshal(request)
 
@@ -115,8 +170,10 @@ func TestGuardBrowserRetryLoopSuccessfulAttemptResetsRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotInput, _ := got["input"].([]any)
-	if count := countBrowserRecoveryMessages(gotInput); count != 0 {
-		t.Fatalf("successful browser attempt left %d recovery messages", count)
+	for _, marker := range []string{browserRecoveryMarker, browserForwardingMarker} {
+		if text := browserGuardTextWithMarker(gotInput, marker); text != "" {
+			t.Fatalf("successful browser attempt left stale %s message: %s", marker, text)
+		}
 	}
 	if !hasAdditionalToolsItem(gotInput) {
 		t.Fatal("successful browser attempt unexpectedly removed tools")
@@ -134,16 +191,33 @@ type browserRetryTestAttempt struct {
 	id     string
 	output string
 	arr    []any // optional structured output (mirrors real tool result shape)
+	input  string
 }
 
 func browserRetryTestBody(attempts []browserRetryTestAttempt) []byte {
 	input := []any{
 		map[string]any{
 			"type": "additional_tools",
-			"tools": []any{map[string]any{
-				"type": "custom",
-				"name": "exec",
-			}},
+			"tools": []any{
+				map[string]any{"type": "custom", "name": "exec"},
+				map[string]any{
+					"type": "function",
+					"name": "wait",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{"cell_id": map[string]any{"type": "string"}},
+						"required": []string{"cell_id"},
+					},
+				},
+				map[string]any{
+					"type": "function",
+					"name": "request_user_input",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{},
+					},
+				},
+			},
 		},
 		map[string]any{
 			"type": "message",
@@ -159,13 +233,17 @@ func browserRetryTestBody(attempts []browserRetryTestAttempt) []byte {
 		if attempt.arr != nil {
 			output = attempt.arr
 		}
+		callInput := attempt.input
+		if callInput == "" {
+			callInput = `const r = await tools.mcp__node_repl__js({code:"const tab = await iab.tabs.create()",title:"browser"}); text(r.output);`
+		}
 		input = append(input,
 			map[string]any{
 				"type":    "custom_tool_call",
 				"id":      attempt.id,
 				"call_id": attempt.id,
 				"name":    "exec",
-				"input":   `const r = await tools.mcp__node_repl__js({code:"const tab = await iab.tabs.create()",title:"browser"}); text(r.output);`,
+				"input":   callInput,
 			},
 			map[string]any{
 				"type":    "custom_tool_call_output",
@@ -175,11 +253,7 @@ func browserRetryTestBody(attempts []browserRetryTestAttempt) []byte {
 		)
 	}
 	body, _ := json.Marshal(map[string]any{
-		"model": "hy3",
-		"tools": []any{map[string]any{
-			"type": "custom",
-			"name": "exec",
-		}},
+		"model":               "hy3",
 		"tool_choice":         "auto",
 		"parallel_tool_calls": true,
 		"input":               input,
@@ -202,17 +276,7 @@ func countBrowserRecoveryMessages(input []any) int {
 }
 
 func browserRecoveryText(input []any) string {
-	for _, rawItem := range input {
-		item, _ := rawItem.(map[string]any)
-		if item == nil {
-			continue
-		}
-		text := bridgeExtractContent(item["content"])
-		if strings.Contains(text, browserRecoveryMarker) {
-			return text
-		}
-	}
-	return ""
+	return browserGuardTextWithMarker(input, browserRecoveryMarker)
 }
 
 func hasAdditionalToolsItem(input []any) bool {
@@ -256,37 +320,49 @@ func TestIsBrowserFailureOutput(t *testing.T) {
 	}
 }
 
-func TestGuardBrowserRetryLoopStopsAfterTwoFailures(t *testing.T) {
+func TestIsBrowserForwardingFailure(t *testing.T) {
+	badWrapper := `const r = await tools.mcp__node_repl__js({code:"nodeRepl.write('ok')"}); text(r.output);`
+	goodWrapper := `const r = await tools.mcp__node_repl__js({code:"nodeRepl.write('ok')"}); for (const p of (r?.content ?? [])) if (p?.type === "text") text(p.text);`
+	if !isBrowserForwardingFailure(badWrapper, "Script completed\nOutput:\nundefined") {
+		t.Fatal("expected r.output + undefined to be classified as forwarding failure")
+	}
+	if isBrowserForwardingFailure(goodWrapper, "Script completed\nOutput:\nundefined") {
+		t.Fatal("correct MCP content extraction must not be classified as forwarding failure")
+	}
+	if isBrowserForwardingFailure(badWrapper, "TypeError: browser disconnected") {
+		t.Fatal("explicit runtime error must not be hidden as forwarding failure")
+	}
+}
+
+func TestGuardBrowserRetryLoopStopsAfterTwoRuntimeFailures(t *testing.T) {
 	body := browserRetryTestBody([]browserRetryTestAttempt{
-		{id: "call_1", output: "undefined"},
+		{id: "call_1", output: "ReferenceError: iab is not defined"},
 		{id: "call_2", output: "SyntaxError: Identifier 'tab' has already been declared"},
 	})
 
 	guarded := guardBrowserRetryLoop(body)
+	bridge := bridgeResponsesRequest(guarded)
+	if bridge.Tools.IsCustom("exec") {
+		t.Fatal("two explicit runtime failures should strip exec")
+	}
+	if _, ok := bridge.Tools["request_user_input"]; !ok {
+		t.Fatalf("two explicit runtime failures should preserve request_user_input: %#v", bridge.Tools)
+	}
 	var request map[string]any
 	if err := json.Unmarshal(guarded, &request); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"tools", "functions", "tool_choice", "function_call", "parallel_tool_calls"} {
-		if _, exists := request[key]; exists {
-			t.Fatalf("two consecutive failures should strip top-level %s", key)
-		}
-	}
 	input, _ := request["input"].([]any)
-	if hasAdditionalToolsItem(input) {
-		t.Fatal("two consecutive failures should strip additional_tools")
-	}
 	if text := browserRecoveryText(input); !strings.Contains(text, "failed 2 consecutive times") {
 		t.Fatalf("missing circuit-breaker instruction: %s", text)
 	}
 }
 
 func TestGuardBrowserRetryLoopArrayOutputFailure(t *testing.T) {
-	// Mirrors the real node_repl result shape: [{"text":"Script completed\n...Output:\n"},{"text":"undefined"}]
 	body := browserRetryTestBody([]browserRetryTestAttempt{
 		{id: "call_1", arr: []any{
 			map[string]any{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
-			map[string]any{"type": "input_text", "text": "undefined"},
+			map[string]any{"type": "input_text", "text": "ReferenceError: iab is not defined"},
 		}},
 		{id: "call_2", arr: []any{
 			map[string]any{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
@@ -295,20 +371,14 @@ func TestGuardBrowserRetryLoopArrayOutputFailure(t *testing.T) {
 	})
 
 	guarded := guardBrowserRetryLoop(body)
-	var request map[string]any
-	if err := json.Unmarshal(guarded, &request); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"tools", "tool_choice", "parallel_tool_calls"} {
-		if _, exists := request[key]; exists {
-			t.Fatalf("array-output failures should strip %s", key)
-		}
+	if bridgeResponsesRequest(guarded).Tools.IsCustom("exec") {
+		t.Fatal("array-shaped explicit runtime failures should strip exec")
 	}
 }
 
 func TestGuardBrowserRetryLoopCaptchaInjectsStopInstruction(t *testing.T) {
 	for _, output := range []string{
-		`{"title":"安全验证","url":"https://www.sogou.com/antispider/"}`, // 搜狗 antispider 页
+		`{"title":"安全验证","url":"https://www.sogou.com/antispider/"}`,
 		`{"title":"Please verify you are human","url":"https://example.com/challenge"}`,
 	} {
 		body := browserRetryTestBody([]browserRetryTestAttempt{{id: "call_1", output: output}})

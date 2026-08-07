@@ -9,6 +9,7 @@ import (
 const (
 	browserRetryLimit             = 2
 	browserRecoveryMarker         = "[workbuddy2api browser recovery]"
+	browserForwardingMarker       = "[workbuddy2api browser forwarding]"
 	browserCaptchaMarker          = "[workbuddy2api browser captcha]"
 	browserOmittedCallInput       = "// previous failed browser attempt omitted from upstream context"
 	browserOmittedToolOutput      = "[previous browser attempt failed; details omitted from upstream context and retained in data/full_io]"
@@ -16,17 +17,21 @@ const (
 )
 
 type browserAttemptAnalysis struct {
-	consecutiveFailures int
-	failedCallIDs       []string
-	lastError           string
-	lastOutput          string
+	consecutiveFailures       int
+	failedCallIDs             []string
+	lastError                 string
+	lastOutput                string
+	lastCallInput             string
+	lastWasForwardingFailure  bool
 }
 
 // guardBrowserRetryLoop limits model-driven Browser retry loops without
-// touching the complete request captured in data/full_io. Older failed calls
-// are compacted before the upstream request is built. After a small number of
-// consecutive failures, all current tool surfaces are removed so the model
-// must stop retrying and report the failure to the user.
+// touching the complete request captured in data/full_io. It distinguishes a
+// real browser/runtime failure from an observability failure in the outer exec
+// wrapper. In particular, MCP tools return CallToolResult content blocks, so
+// `text(r.output)` can surface only "undefined" even though the nested browser
+// call actually ran. That case must not be counted as a Browser failure or
+// blindly replayed.
 func guardBrowserRetryLoop(body []byte) []byte {
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
@@ -47,40 +52,43 @@ func guardBrowserRetryLoop(body []byte) []byte {
 	compactBrowserFailureHistory(input, analysis.failedCallIDs)
 
 	// Anti-bot page: stop automated retries before any recovery/breaker logic.
-	// Tools stay available so the model can still ask the user (e.g. request_user_input).
+	// Tools stay available so the model can still ask the user for manual action.
 	if captchaMarker != "" {
 		input = append(input, browserGuardMessage(
 			fmt.Sprintf(
-				"The in-app Browser page is showing an anti-bot verification challenge (%s). Do NOT keep retrying the browser in this response, do not try alternate page variants or navigation workarounds. If the user's confirmation or manual action is required (e.g. solving a CAPTCHA), briefly tell the user what is blocking the task and ask them to confirm how to proceed; otherwise report the page state you observed.",
+				"The in-app Browser page is showing an anti-bot verification challenge (%s). Do not keep retrying the browser, alternate page variants, or navigation workarounds. If manual action is required, briefly tell the user what is blocking the task and ask them to complete or approve the required step; otherwise report the verified page state.",
 				captchaMarker,
 			),
 			browserCaptchaMarker,
 		))
 		request["input"] = input
-		encoded, err := json.Marshal(request)
-		if err != nil {
-			return body
-		}
-		return encoded
+		return marshalBrowserGuardRequest(body, request)
+	}
+
+	// The nested MCP call may have run successfully, but the outer exec wrapper
+	// read the shell-specific `.output` field from a CallToolResult. Do not treat
+	// this as a browser runtime failure and do not replay unknown side effects.
+	if analysis.lastWasForwardingFailure {
+		input = append(input, browserGuardMessage(
+			"The previous in-app Browser nested MCP call was not surfaced correctly: the outer exec code read `.output`, but mcp__node_repl__js returns an MCP CallToolResult whose textual data is in `content` blocks. This is an output-forwarding failure, not evidence that the Browser itself failed. On the next call, never use r.output for mcp__node_repl__js; if the result is a string call text(r), otherwise iterate (r?.content ?? []) and emit only text parts with text(part.text). Do not stringify the full MCP result because _meta may contain screenshot base64. Do not blindly repeat a potentially state-changing click, submit, send, save, purchase, or delete operation just because its verification output was lost; first choose the safest idempotent/read-only verification or explain that the prior action could not be verified. For read-only navigation/search/setup, one corrected retry is acceptable.",
+			browserForwardingMarker,
+		))
+		request["input"] = input
+		return marshalBrowserGuardRequest(body, request)
 	}
 
 	// A later successful browser result resets the retry state. Keep only the
-	// history compaction and remove stale recovery instructions.
+	// history compaction and remove stale guard instructions.
 	if analysis.consecutiveFailures == 0 {
 		request["input"] = input
-		encoded, err := json.Marshal(request)
-		if err != nil {
-			return body
-		}
-		return encoded
+		return marshalBrowserGuardRequest(body, request)
 	}
 
 	if analysis.consecutiveFailures >= browserRetryLimit {
-		stripAllToolSurfaces(request, input)
-		input = dropBrowserAdditionalToolsItems(input)
+		input = stripBrowserToolSurfaces(request, input)
 		input = append(input, browserGuardMessage(
 			fmt.Sprintf(
-				"The in-app Browser failed %d consecutive times. Do not call any tool again in this response. Briefly tell the user that the browser action could not be completed and include only the latest useful error: %s",
+				"The in-app Browser runtime failed %d consecutive times. Do not call the Browser bridge or the exec tool again in this response. Other non-browser tools may remain available when they are genuinely useful (for example, asking the user for required input). Briefly report that the browser action could not be completed and include only the latest useful runtime error: %s",
 				analysis.consecutiveFailures,
 				analysis.lastError,
 			),
@@ -89,7 +97,7 @@ func guardBrowserRetryLoop(body []byte) []byte {
 	} else {
 		input = append(input, browserGuardMessage(
 			fmt.Sprintf(
-				"The previous in-app Browser attempt failed (%d/%d). Make at most one recovery tool call. Do not read the skill or docs again, do not enumerate tools, and do not try multiple API variants. Use one nested async IIFE, avoid persistent top-level const/let declarations, use a fresh current-branch tab, complete the whole UI task in that one call when possible, and emit the result explicitly with nodeRepl.write(...). If this recovery call fails again, tool access will be revoked and you must stop and report the error to the user in text. Latest error: %s",
+				"The previous in-app Browser runtime attempt failed (%d/%d). Make at most one recovery Browser call. Do not read the skill or docs again, do not enumerate tools, and do not try multiple API variants. Use one nested async IIFE, avoid persistent top-level const/let declarations, use a fresh current-branch tab when recovery really requires a new tab, complete the whole UI task in that one call when possible, and emit the nested MCP result from its text content blocks rather than r.output. If this recovery call fails again with an explicit runtime error, Browser/exec access will be revoked for this response and you must stop and report the error. Latest runtime error: %s",
 				analysis.consecutiveFailures,
 				browserRetryLimit,
 				analysis.lastError,
@@ -98,10 +106,13 @@ func guardBrowserRetryLoop(body []byte) []byte {
 		))
 	}
 	request["input"] = input
+	return marshalBrowserGuardRequest(body, request)
+}
 
+func marshalBrowserGuardRequest(fallback []byte, request map[string]any) []byte {
 	encoded, err := json.Marshal(request)
 	if err != nil {
-		return body
+		return fallback
 	}
 	return encoded
 }
@@ -115,7 +126,8 @@ func containsExplicitBrowserTask(input []any) bool {
 		text := bridgeExtractContent(item["content"])
 		if strings.Contains(text, browserPluginURI) ||
 			strings.Contains(text, browserRoutingMarker) ||
-			strings.Contains(text, browserRecoveryMarker) {
+			strings.Contains(text, browserRecoveryMarker) ||
+			strings.Contains(text, browserForwardingMarker) {
 			return true
 		}
 	}
@@ -123,7 +135,7 @@ func containsExplicitBrowserTask(input []any) bool {
 }
 
 func analyzeBrowserAttempts(input []any) browserAttemptAnalysis {
-	browserCalls := map[string]struct{}{}
+	browserCalls := map[string]string{}
 	analysis := browserAttemptAnalysis{}
 
 	for _, rawItem := range input {
@@ -138,25 +150,37 @@ func analyzeBrowserAttempts(input []any) browserAttemptAnalysis {
 			callInput, _ := item["input"].(string)
 			callID := bridgeCallID(item)
 			if callID != "" && isBrowserToolCall(name, callInput) {
-				browserCalls[callID] = struct{}{}
+				browserCalls[callID] = callInput
 			}
 		case "function_call":
 			name, _ := item["name"].(string)
 			arguments, _ := item["arguments"].(string)
 			callID := bridgeCallID(item)
 			if callID != "" && isBrowserToolCall(name, arguments) {
-				browserCalls[callID] = struct{}{}
+				browserCalls[callID] = arguments
 			}
 		case "custom_tool_call_output", "function_call_output":
 			callID := bridgeCallID(item)
 			if callID == "" {
 				continue
 			}
-			if _, exists := browserCalls[callID]; !exists {
+			callInput, exists := browserCalls[callID]
+			if !exists {
 				continue
 			}
 			output := bridgeToolOutput(item["output"])
 			analysis.lastOutput = output
+			analysis.lastCallInput = callInput
+
+			if isBrowserForwardingFailure(callInput, output) {
+				analysis.consecutiveFailures = 0
+				analysis.failedCallIDs = append(analysis.failedCallIDs, callID)
+				analysis.lastError = "nested MCP CallToolResult was read through .output and surfaced no usable text"
+				analysis.lastWasForwardingFailure = true
+				continue
+			}
+
+			analysis.lastWasForwardingFailure = false
 			if isBrowserFailureOutput(output) {
 				analysis.consecutiveFailures++
 				analysis.failedCallIDs = append(analysis.failedCallIDs, callID)
@@ -189,12 +213,27 @@ func isBrowserToolCall(name, input string) bool {
 	return false
 }
 
+// isBrowserForwardingFailure recognizes the exact failure mode captured from
+// ChatGPT.app: a nested MCP tool was invoked, but the outer exec wrapper used
+// the shell-specific r.output field and therefore emitted only undefined/empty
+// output. The browser call may already have executed, so this must not trigger
+// blind replay or count toward the runtime circuit breaker.
+func isBrowserForwardingFailure(callInput, output string) bool {
+	lowerInput := strings.ToLower(callInput)
+	if !strings.Contains(lowerInput, "mcp__node_repl__js") ||
+		!strings.Contains(lowerInput, ".output") {
+		return false
+	}
+	return browserOutputPayloadMissing(output)
+}
+
 func isBrowserFailureOutput(output string) bool {
-	trimmed := strings.TrimSpace(output)
-	if trimmed == "" {
+	payloadLines := browserPayloadLines(output)
+	if len(payloadLines) == 0 {
 		return true
 	}
-	lower := strings.ToLower(trimmed)
+	payload := strings.Join(payloadLines, "\n")
+	lower := strings.ToLower(payload)
 	for _, marker := range []string{
 		"has already been declared",
 		"is not a function",
@@ -220,26 +259,24 @@ func isBrowserFailureOutput(output string) bool {
 
 	// Serialized object instead of usable content (e.g. {"keys":...,"full":"object"})
 	// is a failure in the browser automation context.
-	if strings.HasPrefix(trimmed, `{"keys":`) || strings.Contains(trimmed, `"full":"object"`) {
+	trimmedPayload := strings.TrimSpace(payload)
+	if strings.HasPrefix(trimmedPayload, `{"keys":`) || strings.Contains(trimmedPayload, `"full":"object"`) {
 		return true
 	}
+	return browserPayloadLinesMissing(payloadLines)
+}
 
-	// Strip the node_repl execution frame ("Script completed\nWall time ...\nOutput:\n")
-	// so only the actual payload is judged.
-	payloadLines := make([]string, 0, 8)
-	for _, line := range strings.Split(lower, "\n") {
-		ls := strings.TrimSpace(line)
-		if ls == "" || isBrowserFrameLine(ls) {
-			continue
-		}
-		payloadLines = append(payloadLines, ls)
-	}
-	if len(payloadLines) == 0 {
+func browserOutputPayloadMissing(output string) bool {
+	return browserPayloadLinesMissing(browserPayloadLines(output))
+}
+
+func browserPayloadLinesMissing(lines []string) bool {
+	if len(lines) == 0 {
 		return true
 	}
-	for _, line := range payloadLines {
-		switch line {
-		case "undefined", "null", "{}", "[]", "[object object]", "nan":
+	for _, line := range lines {
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "", "undefined", "null", "{}", "[]", "[object object]", "nan":
 			continue
 		default:
 			return false
@@ -248,8 +285,21 @@ func isBrowserFailureOutput(output string) bool {
 	return true
 }
 
-// isBrowserFrameLine reports whether a line belongs to the node_repl execution
-// frame rather than the actual tool payload.
+// browserPayloadLines strips the node_repl execution frame
+// ("Script completed\nWall time ...\nOutput:\n") so callers judge only the
+// actual nested tool payload.
+func browserPayloadLines(output string) []string {
+	lines := make([]string, 0, 8)
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || isBrowserFrameLine(strings.ToLower(trimmed)) {
+			continue
+		}
+		lines = append(lines, trimmed)
+	}
+	return lines
+}
+
 func isBrowserFrameLine(line string) bool {
 	for _, prefix := range []string{
 		"script completed",
@@ -303,9 +353,8 @@ func compactBrowserError(output string) string {
 	return text
 }
 
-// removeBrowserRecoveryMessages drops stale guard instructions (both recovery
-// and captcha markers) from developer/system messages so they cannot accumulate
-// across turns.
+// removeBrowserRecoveryMessages drops stale guard instructions so they cannot
+// accumulate across turns.
 func removeBrowserRecoveryMessages(input []any) []any {
 	filtered := make([]any, 0, len(input))
 	for _, rawItem := range input {
@@ -315,6 +364,7 @@ func removeBrowserRecoveryMessages(input []any) []any {
 			if role == "developer" || role == "system" {
 				text := bridgeExtractContent(item["content"])
 				if strings.Contains(text, browserRecoveryMarker) ||
+					strings.Contains(text, browserForwardingMarker) ||
 					strings.Contains(text, browserCaptchaMarker) {
 					continue
 				}
@@ -355,45 +405,151 @@ func compactBrowserFailureHistory(input []any, failedCallIDs []string) {
 	}
 }
 
-func stripAllToolSurfaces(request map[string]any, input []any) {
-	for _, key := range []string{
-		"tools",
-		"functions",
-		"tool_choice",
-		"function_call",
-		"parallel_tool_calls",
-	} {
-		delete(request, key)
+// stripBrowserToolSurfaces removes only the Browser-driving programmatic exec
+// surface after the runtime circuit breaker opens. It intentionally preserves
+// unrelated tools such as request_user_input instead of revoking every tool in
+// the response.
+func stripBrowserToolSurfaces(request map[string]any, input []any) []any {
+	for _, key := range []string{"tools", "functions"} {
+		if value, exists := request[key]; exists {
+			if filtered, keep := filterBrowserRuntimeTools(value); keep {
+				request[key] = filtered
+			} else {
+				delete(request, key)
+			}
+		}
+	}
+
+	filteredInput := make([]any, 0, len(input))
+	for _, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			filteredInput = append(filteredInput, rawItem)
+			continue
+		}
+		for _, key := range []string{"tools", "functions"} {
+			if value, exists := item[key]; exists {
+				if filtered, keep := filterBrowserRuntimeTools(value); keep {
+					item[key] = filtered
+				} else {
+					delete(item, key)
+				}
+			}
+		}
+		if typ, _ := item["type"].(string); typ == "additional_tools" {
+			if _, hasTools := item["tools"]; !hasTools {
+				if _, hasFunctions := item["functions"]; !hasFunctions {
+					continue
+				}
+			}
+		}
+		filteredInput = append(filteredInput, item)
+	}
+
+	if browserToolChoiceTargetsRuntime(request["tool_choice"]) {
+		request["tool_choice"] = "auto"
+	}
+	if !hasCallableToolSurface(request, filteredInput) {
+		delete(request, "tool_choice")
+		delete(request, "parallel_tool_calls")
+	}
+	return filteredInput
+}
+
+func filterBrowserRuntimeTools(value any) ([]any, bool) {
+	tools, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	filtered := make([]any, 0, len(tools))
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			filtered = append(filtered, rawTool)
+			continue
+		}
+		if isBrowserRuntimeToolName(responseToolName(tool)) {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered, len(filtered) > 0
+}
+
+func responseToolName(tool map[string]any) string {
+	if name, _ := tool["name"].(string); name != "" {
+		return name
+	}
+	if function, ok := tool["function"].(map[string]any); ok {
+		name, _ := function["name"].(string)
+		return name
+	}
+	return ""
+}
+
+func isBrowserRuntimeToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "exec", "mcp__node_repl__js":
+		return true
+	default:
+		return false
+	}
+}
+
+func browserToolChoiceTargetsRuntime(choice any) bool {
+	obj, ok := choice.(map[string]any)
+	if !ok {
+		return false
+	}
+	if isBrowserRuntimeToolName(responseToolName(obj)) {
+		return true
+	}
+	if function, ok := obj["function"].(map[string]any); ok {
+		name, _ := function["name"].(string)
+		return isBrowserRuntimeToolName(name)
+	}
+	return false
+}
+
+func hasCallableToolSurface(request map[string]any, input []any) bool {
+	for _, key := range []string{"tools", "functions"} {
+		if hasCallableToolList(request[key]) {
+			return true
+		}
 	}
 	for _, rawItem := range input {
 		item, ok := rawItem.(map[string]any)
 		if !ok {
 			continue
 		}
-		for _, key := range []string{
-			"tools",
-			"functions",
-			"tool_choice",
-			"function_call",
-			"parallel_tool_calls",
-		} {
-			delete(item, key)
-		}
-	}
-}
-
-func dropBrowserAdditionalToolsItems(input []any) []any {
-	filtered := make([]any, 0, len(input))
-	for _, rawItem := range input {
-		item, ok := rawItem.(map[string]any)
-		if ok {
-			if typ, _ := item["type"].(string); typ == "additional_tools" {
-				continue
+		for _, key := range []string{"tools", "functions"} {
+			if hasCallableToolList(item[key]) {
+				return true
 			}
 		}
-		filtered = append(filtered, rawItem)
 	}
-	return filtered
+	return false
+}
+
+func hasCallableToolList(value any) bool {
+	tools, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := tool["type"].(string)
+		if typ == "namespace" {
+			continue
+		}
+		if responseToolName(tool) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func browserGuardMessage(text, marker string) map[string]any {
