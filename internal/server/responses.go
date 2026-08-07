@@ -46,11 +46,13 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	// screenshot base64 before translating tool outputs to text for the upstream
 	// model. Auxiliary task-title requests must remain text-only and must not
 	// inherit the desktop agent's shell/file/browser tools. Then add routing
-	// guidance for an explicitly selected Browser plugin.
+	// guidance for an explicitly selected Browser plugin and stop repeated failed
+	// browser loops before bridging the request to WorkBuddy.
 	compactedBody := compactResponsesToolOutputs(body)
 	titleSafeBody := stripTaskTitleTools(compactedBody)
 	routedBody := injectBrowserPluginRouting(titleSafeBody)
-	bridge := bridgeResponsesRequest(routedBody)
+	guardedBody := guardBrowserRetryLoop(routedBody)
+	bridge := bridgeResponsesRequest(guardedBody)
 	// Responses API stores parallel function calls as separate input items.
 	// Chat Completions requires those calls in one assistant.tool_calls array.
 	chatBody := mergeParallelAssistantToolCalls(bridge.ChatBody)
