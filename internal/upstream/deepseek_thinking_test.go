@@ -21,8 +21,8 @@ func TestPrepareBodyDisablesDeepSeekFlashThinkingForTools(t *testing.T) {
 	if thinking == nil || thinking["type"] != "disabled" {
 		t.Fatalf("thinking not disabled: %#v", got["thinking"])
 	}
-	if got["reasoning_effort"] != "low" {
-		t.Fatalf("reasoning effort not normalized to low: %#v", got["reasoning_effort"])
+	if _, exists := got["reasoning_effort"]; exists {
+		t.Fatalf("reasoning effort must be removed in non-thinking mode: %#v", got["reasoning_effort"])
 	}
 }
 
