@@ -36,12 +36,23 @@ func guardBrowserRetryLoop(body []byte) []byte {
 	}
 
 	analysis := analyzeBrowserAttempts(input)
-	if analysis.consecutiveFailures == 0 && len(analysis.failedCallIDs) == 0 {
+	if len(analysis.failedCallIDs) == 0 {
 		return body
 	}
 
 	input = removeBrowserRecoveryMessages(input)
 	compactBrowserFailureHistory(input, analysis.failedCallIDs)
+
+	// A later successful browser result resets the retry state. Keep only the
+	// history compaction and remove stale recovery instructions.
+	if analysis.consecutiveFailures == 0 {
+		request["input"] = input
+		encoded, err := json.Marshal(request)
+		if err != nil {
+			return body
+		}
+		return encoded
+	}
 
 	if analysis.consecutiveFailures >= browserRetryLimit {
 		stripAllToolSurfaces(request, input)
@@ -102,17 +113,22 @@ func analyzeBrowserAttempts(input []any) browserAttemptAnalysis {
 		case "custom_tool_call":
 			name, _ := item["name"].(string)
 			callInput, _ := item["input"].(string)
-			if isBrowserToolCall(name, callInput) {
-				browserCalls[bridgeCallID(item)] = struct{}{}
+			callID := bridgeCallID(item)
+			if callID != "" && isBrowserToolCall(name, callInput) {
+				browserCalls[callID] = struct{}{}
 			}
 		case "function_call":
 			name, _ := item["name"].(string)
 			arguments, _ := item["arguments"].(string)
-			if isBrowserToolCall(name, arguments) {
-				browserCalls[bridgeCallID(item)] = struct{}{}
+			callID := bridgeCallID(item)
+			if callID != "" && isBrowserToolCall(name, arguments) {
+				browserCalls[callID] = struct{}{}
 			}
 		case "custom_tool_call_output", "function_call_output":
 			callID := bridgeCallID(item)
+			if callID == "" {
+				continue
+			}
 			if _, exists := browserCalls[callID]; !exists {
 				continue
 			}
