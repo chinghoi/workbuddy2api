@@ -12,15 +12,15 @@ import (
 )
 
 type bridgedToolCallState struct {
-	itemID          string
-	callID          string
-	name            string
-	arguments       strings.Builder
-	customPending   strings.Builder
-	customDecoded   int
-	started         bool
-	custom          bool
-	outputIndex     int
+	itemID        string
+	callID        string
+	name          string
+	arguments     strings.Builder
+	customPending strings.Builder
+	customDecoded int
+	started       bool
+	custom        bool
+	outputIndex   int
 }
 
 // StreamResponsesWithTools converts the WorkBuddy chat-completions SSE stream
@@ -140,7 +140,7 @@ func StreamResponsesWithTools(w http.ResponseWriter, r io.Reader, model string, 
 								writeSSEEvent(w, flusher, "response.reasoning_item.added", map[string]any{
 									"type": "response.reasoning_item.added", "item_id": reasoningID,
 									"output_index": reasoningOutputIndex,
-									"item":         map[string]any{"type": "reasoning", "id": reasoningID, "summary": []any{}, "content": []any{}},
+									"item": map[string]any{"type": "reasoning", "id": reasoningID, "summary": []any{}, "content": []any{}},
 								})
 								writeSSEEvent(w, flusher, "response.reasoning_summary_part.added", map[string]any{
 									"type": "response.reasoning_summary_part.added", "item_id": reasoningID,
@@ -167,7 +167,7 @@ func StreamResponsesWithTools(w http.ResponseWriter, r io.Reader, model string, 
 								state, exists := toolStates[index]
 								if !exists {
 									state = &bridgedToolCallState{
-										itemID:      fmt.Sprintf("fc_%d_%d", time.Now().UnixNano(), index),
+										itemID: fmt.Sprintf("fc_%d_%d", time.Now().UnixNano(), index),
 										outputIndex: nextOutputIndex,
 									}
 									nextOutputIndex++
@@ -416,6 +416,7 @@ func ChatToResponseWithTools(chat map[string]any, model string, tools ResponseTo
 							"name": name, "arguments": arguments,
 						})
 					}
+				}
 			}
 		}
 	}
