@@ -8,6 +8,7 @@ import (
 )
 
 const customToolInputFlushBytes = 256
+const customToolInputJSONKey = "\"input\""
 
 // DecodeCustomToolInputPrefix decodes the complete prefix of the synthetic
 // {"input":"..."} wrapper while the JSON string is still arriving in stream
@@ -22,11 +23,11 @@ func DecodeCustomToolInputPrefix(arguments string) (decoded string, complete boo
 		}
 	}
 
-	keyIndex := strings.Index(arguments, `"input"`)
+	keyIndex := strings.Index(arguments, customToolInputJSONKey)
 	if keyIndex < 0 {
 		return "", false
 	}
-	index := keyIndex + len(`"input"`)
+	index := keyIndex + len(customToolInputJSONKey)
 	for index < len(arguments) && isJSONSpace(arguments[index]) {
 		index++
 	}
