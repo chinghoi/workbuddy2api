@@ -12,13 +12,15 @@ import (
 )
 
 type bridgedToolCallState struct {
-	itemID      string
-	callID      string
-	name        string
-	arguments   strings.Builder
-	started     bool
-	custom      bool
-	outputIndex int
+	itemID          string
+	callID          string
+	name            string
+	arguments       strings.Builder
+	customPending   strings.Builder
+	customDecoded   int
+	started         bool
+	custom          bool
+	outputIndex     int
 }
 
 // StreamResponsesWithTools converts the WorkBuddy chat-completions SSE stream
@@ -192,7 +194,9 @@ func StreamResponsesWithTools(w http.ResponseWriter, r io.Reader, model string, 
 								if function != nil {
 									if arguments, ok := function["arguments"].(string); ok && arguments != "" {
 										state.arguments.WriteString(arguments)
-										if state.started && !state.custom {
+										if state.started && state.custom {
+											streamBridgedCustomToolInput(w, flusher, state, false)
+										} else if state.started {
 											writeSSEEvent(w, flusher, "response.function_call_arguments.delta", map[string]any{
 												"type": "response.function_call_arguments.delta", "item_id": state.itemID,
 												"output_index": state.outputIndex, "delta": arguments,
@@ -299,6 +303,26 @@ func emitBridgedToolAdded(w io.Writer, flusher http.Flusher, state *bridgedToolC
 	})
 }
 
+func streamBridgedCustomToolInput(w io.Writer, flusher http.Flusher, state *bridgedToolCallState, force bool) {
+	decoded, _ := DecodeCustomToolInputPrefix(state.arguments.String())
+	if len(decoded) > state.customDecoded {
+		state.customPending.WriteString(decoded[state.customDecoded:])
+		state.customDecoded = len(decoded)
+	}
+	if state.customPending.Len() < customToolInputFlushBytes && !force {
+		return
+	}
+	if state.customPending.Len() == 0 {
+		return
+	}
+	delta := state.customPending.String()
+	state.customPending.Reset()
+	writeSSEEvent(w, flusher, "response.custom_tool_call_input.delta", map[string]any{
+		"type": "response.custom_tool_call_input.delta", "item_id": state.itemID,
+		"output_index": state.outputIndex, "delta": delta,
+	})
+}
+
 func finishBridgedTool(w io.Writer, flusher http.Flusher, state *bridgedToolCallState) map[string]any {
 	if state.callID == "" {
 		state.callID = state.itemID
@@ -306,12 +330,11 @@ func finishBridgedTool(w io.Writer, flusher http.Flusher, state *bridgedToolCall
 	arguments := state.arguments.String()
 	if state.custom {
 		input := DecodeCustomToolInput(arguments)
-		if input != "" {
-			writeSSEEvent(w, flusher, "response.custom_tool_call_input.delta", map[string]any{
-				"type": "response.custom_tool_call_input.delta", "item_id": state.itemID,
-				"output_index": state.outputIndex, "delta": input,
-			})
+		if len(input) > state.customDecoded {
+			state.customPending.WriteString(input[state.customDecoded:])
+			state.customDecoded = len(input)
 		}
+		streamBridgedCustomToolInput(w, flusher, state, true)
 		writeSSEEvent(w, flusher, "response.custom_tool_call_input.done", map[string]any{
 			"type": "response.custom_tool_call_input.done", "item_id": state.itemID,
 			"output_index": state.outputIndex, "input": input,
@@ -393,7 +416,6 @@ func ChatToResponseWithTools(chat map[string]any, model string, tools ResponseTo
 							"name": name, "arguments": arguments,
 						})
 					}
-				}
 			}
 		}
 	}
