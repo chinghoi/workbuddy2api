@@ -54,3 +54,20 @@ func TestCompactResponsesToolOutputsLeavesPlainTextUntouched(t *testing.T) {
 		t.Fatalf("plain tool output changed: %s", got)
 	}
 }
+
+func TestReplaceLongBase64RunsHonorsBoundaryAndPadding(t *testing.T) {
+	short := strings.Repeat("A", minimumBase64RunLength-1)
+	if got, changed := replaceLongBase64Runs(short, minimumBase64RunLength); changed || got != short {
+		t.Fatalf("short run changed: changed=%v len=%d", changed, len(got))
+	}
+
+	long := "prefix," + strings.Repeat("B", minimumBase64RunLength) + "==,suffix"
+	got, changed := replaceLongBase64Runs(long, minimumBase64RunLength)
+	if !changed {
+		t.Fatal("expected long base64 run to be replaced")
+	}
+	want := "prefix," + omittedBinaryPayloadMarker + ",suffix"
+	if got != want {
+		t.Fatalf("unexpected replacement:\n got: %q\nwant: %q", got, want)
+	}
+}
