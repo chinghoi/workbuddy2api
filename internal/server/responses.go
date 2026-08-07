@@ -45,7 +45,9 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	compactedBody := compactResponsesToolOutputs(body)
 	routedBody := injectBrowserPluginRouting(compactedBody)
 	bridge := bridgeResponsesRequest(routedBody)
-	chatBody := bridge.ChatBody
+	// Responses API stores parallel function calls as separate input items.
+	// Chat Completions requires those calls in one assistant.tool_calls array.
+	chatBody := mergeParallelAssistantToolCalls(bridge.ChatBody)
 	if capture != nil {
 		// ChatStream calls PrepareBody before sending. Record that exact dialect,
 		// rather than only the pre-normalized bridge output.
@@ -87,6 +89,13 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		if status >= 400 {
 			if capture != nil {
 				capture.RecordUpstreamError(status, responseBody)
+			}
+			// Invalid request parameters are payload-wide, not account-specific.
+			// Return immediately so identical retries do not cool every account and
+			// turn one deterministic 400 into a misleading pool-wide 503.
+			if isNonRetryableUpstreamRequestError(status, responseBody) {
+				writeOpenAIError(w, status, "upstream_invalid_request", string(responseBody))
+				return
 			}
 			kind := upstream.Classify(status, string(responseBody))
 			switch kind {
