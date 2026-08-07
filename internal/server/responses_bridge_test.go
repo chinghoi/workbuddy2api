@@ -43,10 +43,22 @@ func TestBridgeHoistsChatGPTDeveloperCustomTool(t *testing.T) {
 		t.Fatalf("name=%v", fn["name"])
 	}
 	desc := fn["description"].(string)
-	// The compacted description must stay bounded and must not leak the raw
-	// multi-kilobyte schema (longest run of the original padding).
+	// The compacted description must stay bounded, must not leak the raw
+	// multi-kilobyte schema, and must preserve the result-shape distinction that
+	// programmatic MCP calls depend on.
 	if len(desc) > 1200 || strings.Contains(desc, strings.Repeat("x", 64)) {
 		t.Fatalf("description not compacted: %q", desc)
+	}
+	for _, expected := range []string{
+		"exec_command uses r.output",
+		"MCP methods (tools.mcp__*) return CallToolResult",
+		"r?.content",
+		"never assume r.output",
+		"If a nested tool returns a string, use text(r)",
+	} {
+		if !strings.Contains(desc, expected) {
+			t.Fatalf("exec description missing %q: %s", expected, desc)
+		}
 	}
 	params := fn["parameters"].(map[string]any)
 	if _, ok := params["properties"].(map[string]any)["input"]; !ok {
@@ -80,6 +92,17 @@ func TestBridgeCustomToolRoundTripInputItems(t *testing.T) {
 	tool := messages[1].(map[string]any)
 	if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" || tool["content"] != "done" {
 		t.Fatalf("tool=%#v", tool)
+	}
+}
+
+func TestBridgeToolOutputPreservesContentBlockBoundaries(t *testing.T) {
+	output := []any{
+		map[string]any{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:"},
+		map[string]any{"type": "input_text", "text": `{"url":"https://duckduckgo.com/?q=test"}`},
+	}
+	got := bridgeToolOutput(output)
+	if !strings.Contains(got, "Output:\n{") {
+		t.Fatalf("tool output blocks were concatenated without a boundary: %q", got)
 	}
 }
 
