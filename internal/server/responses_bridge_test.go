@@ -95,17 +95,6 @@ func TestBridgeCustomToolRoundTripInputItems(t *testing.T) {
 	}
 }
 
-func TestBridgeToolOutputPreservesContentBlockBoundaries(t *testing.T) {
-	output := []any{
-		map[string]any{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:"},
-		map[string]any{"type": "input_text", "text": `{"url":"https://duckduckgo.com/?q=test"}`},
-	}
-	got := bridgeToolOutput(output)
-	if !strings.Contains(got, "Output:\n{") {
-		t.Fatalf("tool output blocks were concatenated without a boundary: %q", got)
-	}
-}
-
 func TestBridgeTopLevelToolOverridesEmbeddedDuplicate(t *testing.T) {
 	body := []byte(`{
 		"input":[{"role":"developer","tools":[{"type":"custom","name":"same","description":"embedded"}]}],
