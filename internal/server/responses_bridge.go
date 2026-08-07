@@ -192,21 +192,6 @@ func bridgeToolOutput(output any) string {
 	if text, ok := output.(string); ok {
 		return text
 	}
-	if parts, ok := output.([]any); ok {
-		texts := make([]string, 0, len(parts))
-		for _, rawPart := range parts {
-			part, ok := rawPart.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text, ok := part["text"].(string); ok && text != "" {
-				texts = append(texts, text)
-			}
-		}
-		if len(texts) > 0 {
-			return strings.Join(texts, "\n")
-		}
-	}
 	if text := bridgeExtractContent(output); text != "" {
 		return text
 	}
