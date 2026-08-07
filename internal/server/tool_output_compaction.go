@@ -2,11 +2,11 @@ package server
 
 import (
 	"encoding/json"
-	"regexp"
 	"strings"
 )
 
 const omittedBinaryPayloadMarker = "[binary image omitted from upstream model context; retained in data/full_io]"
+const minimumBase64RunLength = 2048
 
 // Browser tool results can contain screenshots twice: once as a content image
 // and again as a data: URL in _meta. In the Responses request these values are
@@ -14,8 +14,6 @@ const omittedBinaryPayloadMarker = "[binary image omitted from upstream model co
 // them as images; it only pays the token cost of the base64. Keep complete raw
 // request/output capture on disk, but remove those opaque runs from the body
 // sent to the language model.
-var longBase64RunPattern = regexp.MustCompile(`[A-Za-z0-9+/]{2048,}={0,2}`)
-
 func compactResponsesToolOutputs(body []byte) []byte {
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
@@ -100,11 +98,57 @@ func compactToolOutputString(value string, imageContext bool) (string, bool) {
 	if !imageContext && !containsImageEnvelope {
 		return value, false
 	}
+	return replaceLongBase64Runs(value, minimumBase64RunLength)
+}
 
-	replaced := false
-	compacted := longBase64RunPattern.ReplaceAllStringFunc(value, func(string) string {
-		replaced = true
-		return omittedBinaryPayloadMarker
-	})
-	return compacted, replaced
+// Go's regexp engine rejects counted repetitions above 1000, so a pattern such
+// as {2048,} panics during package initialization. Scan base64 runs directly
+// instead; this is linear, allocation-light, and has no startup-time parser.
+func replaceLongBase64Runs(value string, minimumLength int) (string, bool) {
+	if minimumLength <= 0 || len(value) < minimumLength {
+		return value, false
+	}
+
+	var out strings.Builder
+	lastWritten := 0
+	changed := false
+
+	for index := 0; index < len(value); {
+		if !isBase64Alphabet(value[index]) {
+			index++
+			continue
+		}
+
+		start := index
+		for index < len(value) && isBase64Alphabet(value[index]) {
+			index++
+		}
+		alphabetEnd := index
+
+		paddingEnd := alphabetEnd
+		for paddingEnd < len(value) && paddingEnd-alphabetEnd < 2 && value[paddingEnd] == '=' {
+			paddingEnd++
+		}
+
+		if alphabetEnd-start >= minimumLength {
+			out.WriteString(value[lastWritten:start])
+			out.WriteString(omittedBinaryPayloadMarker)
+			lastWritten = paddingEnd
+			changed = true
+		}
+		index = paddingEnd
+	}
+
+	if !changed {
+		return value, false
+	}
+	out.WriteString(value[lastWritten:])
+	return out.String(), true
+}
+
+func isBase64Alphabet(value byte) bool {
+	return value >= 'A' && value <= 'Z' ||
+		value >= 'a' && value <= 'z' ||
+		value >= '0' && value <= '9' ||
+		value == '+' || value == '/'
 }
