@@ -123,7 +123,9 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 	}
 	if len(toolOrder) > 0 {
 		sortInts(toolOrder)
-		calls := make([]map[string]any, 0, len(toolOrder))
+		// Use []any so consumers asserting message["tool_calls"].([]any)
+		// (ChatToResponse / ChatToResponseWithTools) can read the calls back.
+		calls := make([]any, 0, len(toolOrder))
 		for _, idx := range toolOrder {
 			calls = append(calls, toolCalls[idx])
 		}

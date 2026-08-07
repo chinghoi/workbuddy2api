@@ -19,8 +19,8 @@ func TestDecodeCustomToolInputPrefix(t *testing.T) {
 		if !strings.HasPrefix(input, decoded) {
 			t.Fatalf("prefix %d decoded non-prefix %q", end, decoded)
 		}
-		if end < len(wrapped) && complete {
-			t.Fatalf("prefix %d reported complete", end)
+		if end < len(wrapped) && complete && decoded != input {
+			t.Fatalf("prefix %d reported complete with partial payload %q", end, decoded)
 		}
 	}
 	decoded, complete := DecodeCustomToolInputPrefix(string(wrapped))

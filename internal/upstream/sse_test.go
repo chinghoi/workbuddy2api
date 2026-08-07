@@ -132,14 +132,15 @@ data: [DONE]
 		t.Errorf("finish_reason=%v", choice["finish_reason"])
 	}
 	msg := choice["message"].(map[string]any)
-	calls, ok := msg["tool_calls"].([]map[string]any)
+	calls, ok := msg["tool_calls"].([]any)
 	if !ok || len(calls) != 1 {
 		t.Fatalf("tool_calls=%#v", msg["tool_calls"])
 	}
-	if calls[0]["id"] != "call_a" || calls[0]["type"] != "function" {
-		t.Errorf("call meta=%v", calls[0])
+	call, _ := calls[0].(map[string]any)
+	if call["id"] != "call_a" || call["type"] != "function" {
+		t.Errorf("call meta=%v", call)
 	}
-	fn := calls[0]["function"].(map[string]any)
+	fn := call["function"].(map[string]any)
 	if fn["name"] != "get_weather" {
 		t.Errorf("fn.name=%v", fn["name"])
 	}

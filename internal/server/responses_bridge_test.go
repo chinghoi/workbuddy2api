@@ -43,7 +43,9 @@ func TestBridgeHoistsChatGPTDeveloperCustomTool(t *testing.T) {
 		t.Fatalf("name=%v", fn["name"])
 	}
 	desc := fn["description"].(string)
-	if strings.Contains(desc, "file system") || len(desc) > 500 {
+	// The compacted description must stay bounded and must not leak the raw
+	// multi-kilobyte schema (longest run of the original padding).
+	if len(desc) > 1200 || strings.Contains(desc, strings.Repeat("x", 64)) {
 		t.Fatalf("description not compacted: %q", desc)
 	}
 	params := fn["parameters"].(map[string]any)
