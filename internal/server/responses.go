@@ -44,9 +44,12 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 
 	// Preserve the complete client request in full_io, but remove opaque browser
 	// screenshot base64 before translating tool outputs to text for the upstream
-	// model. Then add routing guidance for an explicitly selected Browser plugin.
+	// model. Auxiliary task-title requests must remain text-only and must not
+	// inherit the desktop agent's shell/file/browser tools. Then add routing
+	// guidance for an explicitly selected Browser plugin.
 	compactedBody := compactResponsesToolOutputs(body)
-	routedBody := injectBrowserPluginRouting(compactedBody)
+	titleSafeBody := stripTaskTitleTools(compactedBody)
+	routedBody := injectBrowserPluginRouting(titleSafeBody)
 	bridge := bridgeResponsesRequest(routedBody)
 	// Responses API stores parallel function calls as separate input items.
 	// Chat Completions requires those calls in one assistant.tool_calls array.
