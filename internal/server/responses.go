@@ -39,10 +39,11 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
-	// Explicit plugin://browser@openai-bundled requests need a compact routing
-	// hint because the browser is exposed as a skill plus a deferred JS bridge,
-	// not as a top-level function in the converted chat-completions request.
-	routedBody := injectBrowserPluginRouting(body)
+	// Preserve the complete client request in full_io, but remove opaque browser
+	// screenshot base64 before translating tool outputs to text for the upstream
+	// model. Then add routing guidance for an explicitly selected Browser plugin.
+	compactedBody := compactResponsesToolOutputs(body)
+	routedBody := injectBrowserPluginRouting(compactedBody)
 	bridge := bridgeResponsesRequest(routedBody)
 	chatBody := bridge.ChatBody
 	if capture != nil {
