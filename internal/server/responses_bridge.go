@@ -44,7 +44,7 @@ func bridgeResponsesRequest(body []byte) responsesBridge {
 	toolCandidates := make([]bridgeToolCandidate, 0, 4)
 	switch input := req["input"].(type) {
 	case string:
-		messages = append(messages, map[string]any{"role": "user", "content": input)
+		messages = append(messages, map[string]any{"role": "user", "content": input})
 	case []any:
 		for _, rawItem := range input {
 			item, ok := rawItem.(map[string]any)
@@ -326,7 +326,7 @@ func compactExecToolDescription(description string) string {
 
 	return "Run raw JavaScript orchestration source in a fresh V8 isolate. " +
 		"Use await tools.<name>(...) for shell, file, browser, MCP, Git, and app actions. " +
-		"Nested return shapes differ: exec_command uses r.output; MCP methods (tools.mcp__*) return CallToolResult content blocks, so for textual MCP output use `for (const p of (r?.content ?? [])) if (p?.type === \"text\") text(p.text);` and never assume r.output. If a nested tool returns a string, use text(r). " +
+		"For shell commands use: const r = await tools.exec_command({cmd: \"git status --short\", workdir: \"/path/to/repo\"}); text(r.output); " +
 		"Call text(value) to emit output; bare expressions are discarded. " +
 		"Do not send shell syntax directly and do not use console, require, process, Node imports, direct file-system APIs, or direct network APIs. " +
 		"Input must be raw JavaScript source, not JSON or Markdown. " +
