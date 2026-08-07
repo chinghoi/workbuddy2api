@@ -7,10 +7,10 @@ import "encoding/json"
 // produce a short text label only, never execute shell, file, browser, MCP, or
 // other tools.
 //
-// The desktop request can carry tools both at the top level and embedded in a
-// developer input item. It can also retry with tool-call history after a model
-// incorrectly selected a tool. Remove all of those protocol fields/items while
-// preserving the actual title prompt and ordinary message context.
+// The desktop request can carry tools both at the top level and in a dedicated
+// additional_tools input item. It can also retry with tool-call history after a
+// model incorrectly selected a tool. Remove all of those protocol fields/items
+// while preserving the actual title prompt and ordinary message context.
 func stripTaskTitleTools(body []byte) []byte {
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
@@ -40,7 +40,7 @@ func stripTaskTitleTools(body []byte) []byte {
 		}
 
 		switch itemType, _ := item["type"].(string); itemType {
-		case "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
+		case "additional_tools", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
 			continue
 		}
 
