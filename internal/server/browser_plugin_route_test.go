@@ -23,7 +23,7 @@ func TestInjectBrowserPluginRouting(t *testing.T) {
 				"role": "user",
 				"content": []any{map[string]any{
 					"type": "input_text",
-					"text": "测试 [@浏览器](plugin://browser@openai-bundled) 打开 baidu.com 并搜索 DeepSeek",
+					"text": "测试 [@浏览器](plugin://browser@openai-bundled) 打开 example.com 并点击登录按钮",
 				}},
 			},
 		},
@@ -51,11 +51,38 @@ func TestInjectBrowserPluginRouting(t *testing.T) {
 		"/Users/test/.codex/plugins/browser/skills/control-in-app-browser/SKILL.md",
 		"mcp__node_repl__js",
 		"Do not call request_plugin_install",
+		"Do not enumerate ALL_TOOLS",
+		"as few model/tool round trips as practical",
+		"visible DOM first",
+		"async IIFE",
+		"same language as the user's request",
 		"Do not substitute fetch",
 	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("routing instruction missing %q: %s", expected, text)
 		}
+	}
+	for _, forbidden := range []string{"baidu.com", "DeepSeek"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("routing instruction must not hard-code %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestInjectBrowserPluginRoutingSkipsTaskTitleGeneration(t *testing.T) {
+	body := []byte(`{
+		"model":"hy3",
+		"input":[{
+			"type":"message",
+			"role":"user",
+			"content":[{
+				"type":"input_text",
+				"text":"You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task. User prompt: 测试 [@浏览器](plugin://browser@openai-bundled)"
+			}]
+		}]
+	}`)
+	if got := injectBrowserPluginRouting(body); string(got) != string(body) {
+		t.Fatalf("task-title request changed: %s", got)
 	}
 }
 
