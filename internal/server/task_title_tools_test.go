@@ -16,8 +16,16 @@ func TestStripTaskTitleToolsRemovesAllToolSurfacesAndHistory(t *testing.T) {
 		},
 		"tool_choice":         "auto",
 		"function_call":       "auto",
-		"parallel_tool_calls": true,
+		"parallel_tool_calls": false,
 		"input": []any{
+			map[string]any{
+				"type": "additional_tools",
+				"role": "developer",
+				"tools": []any{
+					map[string]any{"type": "custom", "name": "exec"},
+					map[string]any{"type": "function", "name": "wait"},
+				},
+			},
 			map[string]any{
 				"type": "message",
 				"role": "developer",
@@ -25,12 +33,6 @@ func TestStripTaskTitleToolsRemovesAllToolSurfacesAndHistory(t *testing.T) {
 					"type": "input_text",
 					"text": "Generate only a title.",
 				}},
-				"tools": []any{
-					map[string]any{"type": "custom", "name": "exec"},
-					map[string]any{"type": "function", "name": "wait"},
-				},
-				"tool_choice":         "auto",
-				"parallel_tool_calls": true,
 			},
 			map[string]any{
 				"type": "message",
@@ -77,6 +79,9 @@ func TestStripTaskTitleToolsRemovesAllToolSurfacesAndHistory(t *testing.T) {
 		item, _ := rawItem.(map[string]any)
 		if item == nil {
 			t.Fatalf("input %d is not an object: %#v", index, rawItem)
+		}
+		if itemType, _ := item["type"].(string); itemType == "additional_tools" {
+			t.Fatalf("additional_tools item survived: %#v", item)
 		}
 		for _, key := range []string{"tools", "functions", "tool_choice", "function_call", "parallel_tool_calls"} {
 			if _, exists := item[key]; exists {
