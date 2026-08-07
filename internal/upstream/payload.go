@@ -35,11 +35,13 @@ func PrepareBody(src []byte) []byte {
 }
 
 // rewriteForUpstream 应用所有协议级改写：
-//  1. 敏感模板中和。
-//  2. hy3 系列强制最大思考。
-//  3. deepseek-v4-flash 工具请求关闭 thinking，避免长时间仅输出推理，
+//  1. 去除桌面端在重试/切模型后重复附加的相同元数据块。
+//  2. 敏感模板中和。
+//  3. hy3 系列强制最大思考。
+//  4. deepseek-v4-flash 工具请求关闭 thinking，避免长时间仅输出推理，
 //     并避免后续工具轮次必须回传 reasoning_content 的协议冲突。
 func rewriteForUpstream(obj map[string]any) {
+	dedupeDesktopMetadataMessages(obj)
 	sanitizeBlockedTemplatesIn(obj)
 	forceMaxThinking(obj)
 	normalizeDeepSeekFlashThinking(obj)
