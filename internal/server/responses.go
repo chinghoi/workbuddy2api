@@ -39,7 +39,11 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
-	bridge := bridgeResponsesRequest(body)
+	// Explicit plugin://browser@openai-bundled requests need a compact routing
+	// hint because the browser is exposed as a skill plus a deferred JS bridge,
+	// not as a top-level function in the converted chat-completions request.
+	routedBody := injectBrowserPluginRouting(body)
+	bridge := bridgeResponsesRequest(routedBody)
 	chatBody := bridge.ChatBody
 	if capture != nil {
 		// ChatStream calls PrepareBody before sending. Record that exact dialect,
