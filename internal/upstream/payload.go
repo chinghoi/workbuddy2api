@@ -15,7 +15,7 @@ import (
 )
 
 // PrepareBody 单 pass 改写；无法解析时原样返回。
-// 顺序：强制 stream → 归一化 tool_choice → 协议级改写（敏感模板中和 + hy3 强思考）。
+// 顺序：强制 stream → 归一化 tool_choice → 协议级改写。
 func PrepareBody(src []byte) []byte {
 	if len(src) == 0 {
 		return src
@@ -34,15 +34,15 @@ func PrepareBody(src []byte) []byte {
 	return out
 }
 
-// rewriteForUpstream 应用所有协议级改写（借鉴 lovingfish/workbuddy-cliproxy）：
-//  1. 敏感模板中和：Claude Code 的两句 system 模板会被腾讯内容审核精确匹配，
-//     命中即回"敏感内容"拒答。做最小改写（CLI→CLI tool、Main→Default）绕过精确
-//     匹配，语义不变——属于 cat-and-mouse，上游新增模板句时需同步更新。
-//  2. hy3 系列强制最大思考：CodeBuddy 仅识别 reasoning_effort=high 触发深度思考，
-//     覆盖客户端任何设置（已为 high 时不再重复写）。
+// rewriteForUpstream 应用所有协议级改写：
+//  1. 敏感模板中和。
+//  2. hy3 系列强制最大思考。
+//  3. deepseek-v4-flash 工具请求关闭 thinking，避免长时间仅输出推理，
+//     并避免后续工具轮次必须回传 reasoning_content 的协议冲突。
 func rewriteForUpstream(obj map[string]any) {
 	sanitizeBlockedTemplatesIn(obj)
 	forceMaxThinking(obj)
+	normalizeDeepSeekFlashThinking(obj)
 }
 
 // sanitizeBlockedTemplates 中和会被上游内容审核逐字匹配的 Claude Code 模板句。
