@@ -32,6 +32,9 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	// objects required by Responses API clients. This wrapper is outside the
 	// capture writer so output.raw records the exact normalized client output.
 	w = newResponsesUsageWriter(w)
+	// Keep output items sequential: close any assistant text item before a tool
+	// item starts so ChatGPT.app can switch from "thinking" to tool activity.
+	w = newResponsesItemOrderingWriter(w)
 
 	var peek struct {
 		Stream bool   `json:"stream"`
