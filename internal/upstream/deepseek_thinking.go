@@ -4,15 +4,16 @@ import "strings"
 
 // normalizeDeepSeekFlashThinking keeps agent/tool requests responsive and
 // compatible with the Responses bridge. DeepSeek V4 Flash enables thinking by
-// default, and the desktop client's default "medium" effort is interpreted as
-// high by DeepSeek. In thinking-mode tool conversations every subsequent turn
-// must also replay the complete reasoning_content, which Responses clients do
-// not carry on function_call items.
+// default, and low/medium reasoning_effort values are compatibility-mapped to
+// high while thinking mode is active. In thinking-mode tool conversations every
+// subsequent turn must also replay the complete reasoning_content, which the
+// Responses bridge intentionally does not expose as conversation content.
 //
-// For tool-bearing Flash requests, use non-thinking mode. Keep effort=low as a
-// compatibility fallback for WorkBuddy layers that recognize reasoning_effort
-// but do not forward the newer thinking object. Plain chat requests are left
-// untouched.
+// For tool-bearing Flash requests, explicitly select non-thinking mode and
+// remove reasoning_effort entirely. Sending effort=low is not a low-cost
+// fallback for DeepSeek V4: providers that recognize the effort field can map
+// it to high and effectively undo the thinking disable request. Plain chat
+// requests are left untouched.
 func normalizeDeepSeekFlashThinking(obj map[string]any) {
 	model, _ := obj["model"].(string)
 	if !strings.EqualFold(strings.TrimSpace(model), "deepseek-v4-flash") {
@@ -23,5 +24,5 @@ func normalizeDeepSeekFlashThinking(obj map[string]any) {
 		return
 	}
 	obj["thinking"] = map[string]any{"type": "disabled"}
-	obj["reasoning_effort"] = "low"
+	delete(obj, "reasoning_effort")
 }
