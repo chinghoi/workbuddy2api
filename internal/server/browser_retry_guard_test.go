@@ -25,6 +25,7 @@ func TestGuardBrowserRetryLoopAddsSingleRecoveryInstruction(t *testing.T) {
 		"Make at most one recovery tool call",
 		"one nested async IIFE",
 		"nodeRepl.write",
+		"tool access will be revoked",
 		"Identifier 'tab' has already been declared",
 	} {
 		if !strings.Contains(text, expected) {
@@ -104,7 +105,7 @@ func TestGuardBrowserRetryLoopSuccessfulAttemptResetsRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	input, _ := request["input"].([]any)
-	input = append(input, browserGuardMessage("stale recovery"))
+	input = append(input, browserGuardMessage("stale recovery", browserRecoveryMarker))
 	request["input"] = input
 	body, _ = json.Marshal(request)
 
@@ -132,6 +133,7 @@ func TestGuardBrowserRetryLoopLeavesNonBrowserRequestByteIdentical(t *testing.T)
 type browserRetryTestAttempt struct {
 	id     string
 	output string
+	arr    []any // optional structured output (mirrors real tool result shape)
 }
 
 func browserRetryTestBody(attempts []browserRetryTestAttempt) []byte {
@@ -153,18 +155,22 @@ func browserRetryTestBody(attempts []browserRetryTestAttempt) []byte {
 		},
 	}
 	for _, attempt := range attempts {
+		output := any(attempt.output)
+		if attempt.arr != nil {
+			output = attempt.arr
+		}
 		input = append(input,
 			map[string]any{
-				"type": "custom_tool_call",
-				"id": attempt.id,
+				"type":    "custom_tool_call",
+				"id":      attempt.id,
 				"call_id": attempt.id,
-				"name": "exec",
-				"input": `const r = await tools.mcp__node_repl__js({code:"const tab = await iab.tabs.create()",title:"browser"}); text(r.output);`,
+				"name":    "exec",
+				"input":   `const r = await tools.mcp__node_repl__js({code:"const tab = await iab.tabs.create()",title:"browser"}); text(r.output);`,
 			},
 			map[string]any{
-				"type": "custom_tool_call_output",
+				"type":    "custom_tool_call_output",
 				"call_id": attempt.id,
-				"output": attempt.output,
+				"output":  output,
 			},
 		)
 	}
@@ -174,9 +180,9 @@ func browserRetryTestBody(attempts []browserRetryTestAttempt) []byte {
 			"type": "custom",
 			"name": "exec",
 		}},
-		"tool_choice": "auto",
+		"tool_choice":         "auto",
 		"parallel_tool_calls": true,
-		"input": input,
+		"input":               input,
 	})
 	return body
 }
@@ -220,4 +226,119 @@ func hasAdditionalToolsItem(input []any) bool {
 		}
 	}
 	return false
+}
+
+func TestIsBrowserFailureOutput(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"empty", "", true},
+		{"bare undefined", "undefined", true},
+		{"bare error", "TypeError: allInnerTexts is not a function", true},
+		{"declared", "SyntaxError: Identifier 'tab' has already been declared", true},
+		{"v8 typeerror", "Cannot read properties of undefined (reading 'evaluate')", true},
+		{"v8 undefined var", "ReferenceError: gUrl is not defined", true},
+		{"illegal return", "SyntaxError: Illegal return statement", true},
+		{"serialized object", `{"keys":["content","isError"],"full":"object"}`, true},
+		{"frame plus undefined", "Script completed\nWall time 0.1 seconds\nOutput:\nundefined", true},
+		{"frame plus null", "Script completed\nWall time 0.5 seconds\nOutput:\nnull", true},
+		{"frame plus error", "Script completed\nWall time 0.2 seconds\nOutput:\nTypeError: tab is undefined", true},
+		{"frame plus empty", "Script completed\nWall time 0.2 seconds\nOutput:\n", true},
+		{"page content", `{"url":"https://www.sogou.com/","title":"搜狗搜索引擎"}`, false},
+		{"real payload", "搜索完成，结果如下", false},
+	}
+	for _, tc := range cases {
+		if got := isBrowserFailureOutput(tc.output); got != tc.want {
+			t.Errorf("%s: isBrowserFailureOutput(%q) = %v, want %v", tc.name, tc.output, got, tc.want)
+		}
+	}
+}
+
+func TestGuardBrowserRetryLoopStopsAfterTwoFailures(t *testing.T) {
+	body := browserRetryTestBody([]browserRetryTestAttempt{
+		{id: "call_1", output: "undefined"},
+		{id: "call_2", output: "SyntaxError: Identifier 'tab' has already been declared"},
+	})
+
+	guarded := guardBrowserRetryLoop(body)
+	var request map[string]any
+	if err := json.Unmarshal(guarded, &request); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"tools", "functions", "tool_choice", "function_call", "parallel_tool_calls"} {
+		if _, exists := request[key]; exists {
+			t.Fatalf("two consecutive failures should strip top-level %s", key)
+		}
+	}
+	input, _ := request["input"].([]any)
+	if hasAdditionalToolsItem(input) {
+		t.Fatal("two consecutive failures should strip additional_tools")
+	}
+	if text := browserRecoveryText(input); !strings.Contains(text, "failed 2 consecutive times") {
+		t.Fatalf("missing circuit-breaker instruction: %s", text)
+	}
+}
+
+func TestGuardBrowserRetryLoopArrayOutputFailure(t *testing.T) {
+	// Mirrors the real node_repl result shape: [{"text":"Script completed\n...Output:\n"},{"text":"undefined"}]
+	body := browserRetryTestBody([]browserRetryTestAttempt{
+		{id: "call_1", arr: []any{
+			map[string]any{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
+			map[string]any{"type": "input_text", "text": "undefined"},
+		}},
+		{id: "call_2", arr: []any{
+			map[string]any{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
+			map[string]any{"type": "input_text", "text": "Cannot read properties of undefined (reading 'evaluate')"},
+		}},
+	})
+
+	guarded := guardBrowserRetryLoop(body)
+	var request map[string]any
+	if err := json.Unmarshal(guarded, &request); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"tools", "tool_choice", "parallel_tool_calls"} {
+		if _, exists := request[key]; exists {
+			t.Fatalf("array-output failures should strip %s", key)
+		}
+	}
+}
+
+func TestGuardBrowserRetryLoopCaptchaInjectsStopInstruction(t *testing.T) {
+	for _, output := range []string{
+		`{"title":"安全验证","url":"https://www.sogou.com/antispider/"}`, // 搜狗 antispider 页
+		`{"title":"Please verify you are human","url":"https://example.com/challenge"}`,
+	} {
+		body := browserRetryTestBody([]browserRetryTestAttempt{{id: "call_1", output: output}})
+
+		guarded := guardBrowserRetryLoop(body)
+		var request map[string]any
+		if err := json.Unmarshal(guarded, &request); err != nil {
+			t.Fatal(err)
+		}
+		input, _ := request["input"].([]any)
+		text := browserGuardTextWithMarker(input, browserCaptchaMarker)
+		if !strings.Contains(text, "anti-bot verification challenge") {
+			t.Fatalf("missing captcha instruction for %q: %s", output, text)
+		}
+		if !hasAdditionalToolsItem(input) {
+			t.Fatalf("captcha page must not strip tools for %q", output)
+		}
+	}
+}
+
+func browserGuardTextWithMarker(input []any, marker string) string {
+	for _, rawItem := range input {
+		item, _ := rawItem.(map[string]any)
+		if item == nil {
+			continue
+		}
+		text := bridgeExtractContent(item["content"])
+		if strings.Contains(text, marker) {
+			return text
+		}
+	}
+	return ""
 }

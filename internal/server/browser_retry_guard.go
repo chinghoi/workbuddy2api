@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	browserRetryLimit             = 3
+	browserRetryLimit             = 2
 	browserRecoveryMarker         = "[workbuddy2api browser recovery]"
+	browserCaptchaMarker          = "[workbuddy2api browser captcha]"
 	browserOmittedCallInput       = "// previous failed browser attempt omitted from upstream context"
 	browserOmittedToolOutput      = "[previous browser attempt failed; details omitted from upstream context and retained in data/full_io]"
 	browserRecentFailuresToRetain = 2
@@ -18,6 +19,7 @@ type browserAttemptAnalysis struct {
 	consecutiveFailures int
 	failedCallIDs       []string
 	lastError           string
+	lastOutput          string
 }
 
 // guardBrowserRetryLoop limits model-driven Browser retry loops without
@@ -36,12 +38,31 @@ func guardBrowserRetryLoop(body []byte) []byte {
 	}
 
 	analysis := analyzeBrowserAttempts(input)
-	if len(analysis.failedCallIDs) == 0 {
+	captchaMarker := browserCaptchaChallenge(analysis.lastOutput)
+	if len(analysis.failedCallIDs) == 0 && captchaMarker == "" {
 		return body
 	}
 
 	input = removeBrowserRecoveryMessages(input)
 	compactBrowserFailureHistory(input, analysis.failedCallIDs)
+
+	// Anti-bot page: stop automated retries before any recovery/breaker logic.
+	// Tools stay available so the model can still ask the user (e.g. request_user_input).
+	if captchaMarker != "" {
+		input = append(input, browserGuardMessage(
+			fmt.Sprintf(
+				"The in-app Browser page is showing an anti-bot verification challenge (%s). Do NOT keep retrying the browser in this response, do not try alternate page variants or navigation workarounds. If the user's confirmation or manual action is required (e.g. solving a CAPTCHA), briefly tell the user what is blocking the task and ask them to confirm how to proceed; otherwise report the page state you observed.",
+				captchaMarker,
+			),
+			browserCaptchaMarker,
+		))
+		request["input"] = input
+		encoded, err := json.Marshal(request)
+		if err != nil {
+			return body
+		}
+		return encoded
+	}
 
 	// A later successful browser result resets the retry state. Keep only the
 	// history compaction and remove stale recovery instructions.
@@ -63,15 +84,17 @@ func guardBrowserRetryLoop(body []byte) []byte {
 				analysis.consecutiveFailures,
 				analysis.lastError,
 			),
+			browserRecoveryMarker,
 		))
 	} else {
 		input = append(input, browserGuardMessage(
 			fmt.Sprintf(
-				"The previous in-app Browser attempt failed (%d/%d). Make at most one recovery tool call. Do not read the skill or docs again, do not enumerate tools, and do not try multiple API variants. Use one nested async IIFE, avoid persistent top-level const/let declarations, use a fresh current-branch tab, complete the whole UI task in that one call when possible, and emit the result explicitly with nodeRepl.write(...). If this recovery call fails, stop and report the error instead of retrying. Latest error: %s",
+				"The previous in-app Browser attempt failed (%d/%d). Make at most one recovery tool call. Do not read the skill or docs again, do not enumerate tools, and do not try multiple API variants. Use one nested async IIFE, avoid persistent top-level const/let declarations, use a fresh current-branch tab, complete the whole UI task in that one call when possible, and emit the result explicitly with nodeRepl.write(...). If this recovery call fails again, tool access will be revoked and you must stop and report the error to the user in text. Latest error: %s",
 				analysis.consecutiveFailures,
 				browserRetryLimit,
 				analysis.lastError,
 			),
+			browserRecoveryMarker,
 		))
 	}
 	request["input"] = input
@@ -133,6 +156,7 @@ func analyzeBrowserAttempts(input []any) browserAttemptAnalysis {
 				continue
 			}
 			output := bridgeToolOutput(item["output"])
+			analysis.lastOutput = output
 			if isBrowserFailureOutput(output) {
 				analysis.consecutiveFailures++
 				analysis.failedCallIDs = append(analysis.failedCallIDs, callID)
@@ -177,6 +201,14 @@ func isBrowserFailureOutput(output string) bool {
 		"referenceerror",
 		"typeerror",
 		"syntaxerror",
+		"cannot read properties of undefined",
+		"cannot read properties of null",
+		"is not defined",
+		"unexpected token",
+		"unexpected identifier",
+		"unexpected end of input",
+		"invalid or unexpected token",
+		"illegal return statement",
 		"unsupported import in exec",
 		"privileged native pipe bridge is not available",
 		"browser-client is not trusted",
@@ -186,21 +218,75 @@ func isBrowserFailureOutput(output string) bool {
 		}
 	}
 
-	lines := strings.FieldsFunc(lower, func(r rune) bool {
-		return r == '\n' || r == '\r'
-	})
-	if len(lines) == 0 {
+	// Serialized object instead of usable content (e.g. {"keys":...,"full":"object"})
+	// is a failure in the browser automation context.
+	if strings.HasPrefix(trimmed, `{"keys":`) || strings.Contains(trimmed, `"full":"object"`) {
 		return true
 	}
-	for _, line := range lines {
-		switch strings.TrimSpace(line) {
-		case "", "undefined", "null", "{}", "[]", "[object object]":
+
+	// Strip the node_repl execution frame ("Script completed\nWall time ...\nOutput:\n")
+	// so only the actual payload is judged.
+	payloadLines := make([]string, 0, 8)
+	for _, line := range strings.Split(lower, "\n") {
+		ls := strings.TrimSpace(line)
+		if ls == "" || isBrowserFrameLine(ls) {
+			continue
+		}
+		payloadLines = append(payloadLines, ls)
+	}
+	if len(payloadLines) == 0 {
+		return true
+	}
+	for _, line := range payloadLines {
+		switch line {
+		case "undefined", "null", "{}", "[]", "[object object]", "nan":
 			continue
 		default:
 			return false
 		}
 	}
 	return true
+}
+
+// isBrowserFrameLine reports whether a line belongs to the node_repl execution
+// frame rather than the actual tool payload.
+func isBrowserFrameLine(line string) bool {
+	for _, prefix := range []string{
+		"script completed",
+		"script failed",
+		"wall time",
+		"output:",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// browserCaptchaChallenge returns a challenge marker when the latest browser
+// output looks like an anti-bot page, or "" when it does not.
+func browserCaptchaChallenge(output string) string {
+	if output == "" {
+		return ""
+	}
+	lower := strings.ToLower(output)
+	for _, marker := range []string{
+		"captcha",
+		"antispider",
+		"anti-spider",
+		"anti spider",
+		"verify you are human",
+		"verification required",
+		"安全验证",
+		"滑动验证",
+		"geetest",
+	} {
+		if strings.Contains(lower, marker) {
+			return marker
+		}
+	}
+	return ""
 }
 
 func compactBrowserError(output string) string {
@@ -217,15 +303,21 @@ func compactBrowserError(output string) string {
 	return text
 }
 
+// removeBrowserRecoveryMessages drops stale guard instructions (both recovery
+// and captcha markers) from developer/system messages so they cannot accumulate
+// across turns.
 func removeBrowserRecoveryMessages(input []any) []any {
 	filtered := make([]any, 0, len(input))
 	for _, rawItem := range input {
 		item, ok := rawItem.(map[string]any)
 		if ok {
 			role, _ := item["role"].(string)
-			if (role == "developer" || role == "system") &&
-				strings.Contains(bridgeExtractContent(item["content"]), browserRecoveryMarker) {
-				continue
+			if role == "developer" || role == "system" {
+				text := bridgeExtractContent(item["content"])
+				if strings.Contains(text, browserRecoveryMarker) ||
+					strings.Contains(text, browserCaptchaMarker) {
+					continue
+				}
 			}
 		}
 		filtered = append(filtered, rawItem)
@@ -304,13 +396,13 @@ func dropBrowserAdditionalToolsItems(input []any) []any {
 	return filtered
 }
 
-func browserGuardMessage(text string) map[string]any {
+func browserGuardMessage(text, marker string) map[string]any {
 	return map[string]any{
 		"type": "message",
 		"role": "developer",
 		"content": []any{map[string]any{
 			"type": "input_text",
-			"text": browserRecoveryMarker + " " + text,
+			"text": marker + " " + text,
 		}},
 	}
 }
